@@ -1,0 +1,29 @@
+{
+    "best_model": "Gradient Boosting",
+    "threshold": 0.24,
+    "test_metrics": {
+        "accuracy": 0.7717799795011958,
+        "precision": 0.47987220447284346,
+        "recall": 0.5899450117831894,
+        "f1_score": 0.529245947850599,
+        "roc_auc": 0.7755926190575404,
+        "pr_auc": 0.5362612421028427
+    },
+    "confusion_matrix": [
+        [
+            3767,
+            814
+        ],
+        [
+            522,
+            751
+        ]
+    ],
+    "validation_min_recall": 0.6,
+    "validation_metrics": {
+        "accuracy": 0.7782712675093952,
+        "precision": 0.4921135646687697,
+        "recall": 0.612725844461901,
+        "f1_score": 0.5458362491252624
+    }
+}
