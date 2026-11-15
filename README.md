@@ -1,4 +1,5 @@
 # RepayIQ
+Link: https://repayiq.streamlit.app/
 
 ### Intelligent Repayment Risk Analytics
 
