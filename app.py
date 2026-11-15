@@ -1,5 +1,6 @@
 
 import hashlib
+import os
 
 import numpy as np
 import pandas as pd
@@ -7,9 +8,12 @@ import plotly.express as px
 import streamlit as st
 
 from config import REPORT_DIR
-from src.predict import predict_customers, load_model
+from src.predict import (
+    predict_customers,
+    load_model,
+    prepare_model_features,
+)
 from src.explain import explain_customer
-from src.feature_engineering import create_features
 
 
 # =====================================================
@@ -17,10 +21,10 @@ from src.feature_engineering import create_features
 # =====================================================
 
 st.set_page_config(
-    page_title="RepayIQ",
+    page_title="RepayIQ | Credit Risk Intelligence",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
@@ -28,8 +32,9 @@ st.set_page_config(
 # STYLING
 # =====================================================
 
-st.markdown("""
-<style>
+st.markdown(
+    """
+    <style>
     .block-container {
         padding-top: 1.8rem;
         padding-bottom: 2rem;
@@ -63,8 +68,55 @@ st.markdown("""
         border-radius: 10px;
         overflow: hidden;
     }
-</style>
-""", unsafe_allow_html=True)
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# =====================================================
+# CONSTANTS
+# =====================================================
+
+RISK_COLORS = {
+    "Low Risk": "#22C55E",
+    "Medium Risk": "#F59E0B",
+    "High Risk": "#EF4444",
+}
+
+RISK_LEVELS = [
+    "Low Risk",
+    "Medium Risk",
+    "High Risk",
+]
+
+RAW_COLUMNS = (
+    ["credit_limit"]
+    + [f"repay_status_{i}" for i in range(1, 7)]
+    + [f"bill_{i}" for i in range(1, 7)]
+    + [f"payment_{i}" for i in range(1, 7)]
+)
+
+COLUMN_MAPPING = {
+    "X1": "credit_limit",
+    "X2": "sex",
+    "X3": "education",
+    "X4": "marital_status",
+    "X5": "age",
+    **{
+        f"X{i + 5}": f"repay_status_{i}"
+        for i in range(1, 7)
+    },
+    **{
+        f"X{i + 11}": f"bill_{i}"
+        for i in range(1, 7)
+    },
+    **{
+        f"X{i + 17}": f"payment_{i}"
+        for i in range(1, 7)
+    },
+    "Y": "default_next_month",
+}
 
 
 # =====================================================
@@ -72,59 +124,68 @@ st.markdown("""
 # =====================================================
 
 @st.cache_resource
-def get_model_bundle():
+def get_model_bundle(model_choice):
+    # load_model reads REPAYIQ_MODEL from environment.
+    # This is set before calling this function.
     return load_model()
 
 
-@st.cache_data
-def load_data():
-    data = pd.read_csv(
-        REPORT_DIR / "demo_customers.csv"
-    )
+@st.cache_data(show_spinner=False)
+def read_demo_data():
+    path = REPORT_DIR / "demo_customers.csv"
 
-    data.insert(
-        0,
-        "Customer ID",
-        [
-            f"DEMO-{i:05d}"
-            for i in range(1, len(data) + 1)
-        ]
-    )
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Demo dataset not found: {path}"
+        )
 
+    data = pd.read_csv(path)
+
+    if "Customer ID" not in data.columns:
+        data.insert(
+            0,
+            "Customer ID",
+            [
+                f"DEMO-{i:05d}"
+                for i in range(1, len(data) + 1)
+            ],
+        )
+
+    return data
+
+
+@st.cache_data(show_spinner=False)
+def get_predictions(model_choice):
+    data = read_demo_data()
     return predict_customers(data)
 
 
 @st.cache_data(show_spinner=False)
-def get_explanation(customer_id):
-    record = df[
-        df["Customer ID"] == customer_id
+def get_explanation(customer_id, model_choice):
+    data = read_demo_data()
+
+    record = data[
+        data["Customer ID"] == customer_id
     ].head(1)
 
+    if record.empty:
+        raise ValueError(
+            f"Customer not found: {customer_id}"
+        )
+
     return explain_customer(record)
-
-
-bundle = get_model_bundle()
-required_features = bundle["features"]
-df = load_data()
 
 
 # =====================================================
 # HELPERS
 # =====================================================
 
-RISK_COLORS = {
-    "Low Risk": "#22C55E",
-    "Medium Risk": "#F59E0B",
-    "High Risk": "#EF4444"
-}
-
-
 def style_chart(fig, height=None):
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font_color="#FFFFFF",
-        margin=dict(l=10, r=10, t=35, b=10)
+        margin=dict(l=10, r=10, t=35, b=10),
     )
 
     if height is not None:
@@ -137,16 +198,13 @@ def risk_distribution(data):
     counts = (
         data["risk_level"]
         .value_counts()
-        .reindex(
-            ["Low Risk", "Medium Risk", "High Risk"],
-            fill_value=0
-        )
+        .reindex(RISK_LEVELS, fill_value=0)
         .reset_index()
     )
 
     counts.columns = [
         "Risk Level",
-        "Accounts"
+        "Accounts",
     ]
 
     fig = px.pie(
@@ -155,7 +213,7 @@ def risk_distribution(data):
         values="Accounts",
         hole=0.55,
         color="Risk Level",
-        color_discrete_map=RISK_COLORS
+        color_discrete_map=RISK_COLORS,
     )
 
     return style_chart(fig)
@@ -169,30 +227,34 @@ def display_risk_table(data):
         "credit_limit",
         "late_payment_count",
         "recent_delay",
-        "payment_to_bill_ratio"
+        "payment_to_bill_ratio",
     ]
 
-    display = data[columns].rename(columns={
-        "risk_percentage": "Risk Score (%)",
-        "risk_level": "Risk Level",
-        "credit_limit": "Credit Limit",
-        "late_payment_count": "Late Payment Months",
-        "recent_delay": "Recent Status",
-        "payment_to_bill_ratio": "Payment-to-Bill Ratio"
-    })
+    display = data[columns].copy()
+
+    display = display.rename(
+        columns={
+            "risk_percentage": "Risk Score (%)",
+            "risk_level": "Risk Level",
+            "credit_limit": "Credit Limit",
+            "late_payment_count": "Late Payment Months",
+            "recent_delay": "Recent Status",
+            "payment_to_bill_ratio": "Payment-to-Bill Ratio",
+        }
+    )
 
     st.dataframe(
         display,
-        width="stretch",
-        hide_index=True
+        use_container_width=True,
+        hide_index=True,
     )
 
 
-def prepare_uploaded_data(uploaded_df):
+def prepare_uploaded_data(uploaded_df, bundle):
     data = uploaded_df.copy()
 
     if data.empty:
-        raise ValueError("CSV is empty.")
+        raise ValueError("Uploaded CSV is empty.")
 
     if len(data) > 10000:
         raise ValueError(
@@ -204,125 +266,104 @@ def prepare_uploaded_data(uploaded_df):
             "CSV contains duplicate column names."
         )
 
-    column_mapping = {
-        "X1": "credit_limit",
-        "X2": "sex",
-        "X3": "education",
-        "X4": "marital_status",
-        "X5": "age",
-        **{
-            f"X{i + 5}": f"repay_status_{i}"
-            for i in range(1, 7)
-        },
-        **{
-            f"X{i + 11}": f"bill_{i}"
-            for i in range(1, 7)
-        },
-        **{
-            f"X{i + 17}": f"payment_{i}"
-            for i in range(1, 7)
-        },
-        "Y": "default_next_month"
-    }
+    # Support original UCI column names.
+    data = data.rename(
+        columns=COLUMN_MAPPING
+    )
 
-    data = data.rename(columns=column_mapping)
+    if data.columns.duplicated().any():
+        raise ValueError(
+            "CSV contains conflicting column names "
+            "after renaming."
+        )
 
+    # Preserve customer IDs where provided.
+    if "Customer ID" not in data.columns:
+        if "ID" in data.columns:
+            data = data.rename(
+                columns={"ID": "Customer ID"}
+            )
+        else:
+            data.insert(
+                0,
+                "Customer ID",
+                [
+                    f"BATCH-{i:05d}"
+                    for i in range(1, len(data) + 1)
+                ],
+            )
+
+    ids = data["Customer ID"]
+
+    if (
+        ids.isna().any()
+        or ids.astype(str).str.strip().eq("").any()
+        or ids.astype(str).duplicated().any()
+    ):
+        raise ValueError(
+            "Customer IDs must be unique and non-empty."
+        )
+
+    # Remove labels and excluded demographic inputs.
     data = data.drop(
         columns=[
             "default_next_month",
             "sex",
             "education",
             "marital_status",
-            "age"
+            "age",
         ],
-        errors="ignore"
+        errors="ignore",
     )
 
-    missing_features = [
-        col for col in required_features
+    missing_raw = [
+        col for col in RAW_COLUMNS
         if col not in data.columns
     ]
 
-    if missing_features:
-        raw_columns = (
-            ["credit_limit"]
-            + [
-                f"repay_status_{i}"
-                for i in range(1, 7)
-            ]
-            + [
-                f"bill_{i}"
-                for i in range(1, 7)
-            ]
-            + [
-                f"payment_{i}"
-                for i in range(1, 7)
-            ]
+    if missing_raw:
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing_raw)
         )
 
-        missing_raw = [
-            col for col in raw_columns
-            if col not in data.columns
-        ]
-
-        if missing_raw:
-            raise ValueError(
-                "Missing columns: "
-                + ", ".join(missing_raw)
-            )
-
-        for col in raw_columns:
-            data[col] = pd.to_numeric(
-                data[col],
-                errors="coerce"
-            )
-
-        if data[raw_columns].isna().any().any():
-            raise ValueError(
-                "Invalid numeric values in CSV."
-            )
-
-        data = create_features(data)
-
-    for col in required_features:
+    for col in RAW_COLUMNS:
         data[col] = pd.to_numeric(
             data[col],
-            errors="coerce"
+            errors="coerce",
         )
 
-    values = data[required_features].to_numpy(
+    values = data[RAW_COLUMNS].to_numpy(
         dtype=float
     )
 
     if not np.isfinite(values).all():
         raise ValueError(
-            "CSV contains missing or invalid values."
+            "CSV contains missing or invalid "
+            "numeric values."
         )
 
     if (data["credit_limit"] <= 0).any():
         raise ValueError(
-            "Credit limit must be positive."
+            "Credit limit must be greater than zero."
         )
 
-    if "Customer ID" not in data.columns:
-        data.insert(
-            0,
-            "Customer ID",
-            [
-                f"BATCH-{i:05d}"
-                for i in range(1, len(data) + 1)
-            ]
-        )
-    else:
-        if (
-            data["Customer ID"].isna().any()
-            or data["Customer ID"].astype(str).duplicated().any()
-        ):
-            raise ValueError(
-                "Customer IDs must be unique and non-empty."
-            )
+    # Validate the complete model feature pipeline.
+    # predict_customers will prepare features again.
+    # We return raw inputs to avoid passing modified
+    # features as if they were user-provided values.
+    prepare_model_features(data, bundle)
 
     return data
+
+
+def export_dataframe(data):
+    export = data.drop(
+        columns=["warning_indicators"],
+        errors="ignore",
+    )
+
+    return export.to_csv(index=False)
 
 
 # =====================================================
@@ -330,6 +371,56 @@ def prepare_uploaded_data(uploaded_df):
 # =====================================================
 
 st.sidebar.title("RepayIQ")
+st.sidebar.caption("Credit Risk Intelligence Platform")
+
+model_choice = st.sidebar.selectbox(
+    "Prediction Model",
+    [
+        "Original Model",
+        "Advanced CatBoost",
+    ],
+    index=0,
+)
+
+model_key = (
+    "catboost"
+    if model_choice == "Advanced CatBoost"
+    else "original"
+)
+
+os.environ["REPAYIQ_MODEL"] = model_key
+
+try:
+    bundle = get_model_bundle(model_key)
+except Exception as error:
+    st.error(
+        f"Unable to load {model_choice}: {error}"
+    )
+    st.stop()
+
+st.sidebar.divider()
+
+st.sidebar.write(
+    "**Active Model:**",
+    bundle.get("model_name", model_choice),
+)
+
+st.sidebar.write(
+    "**Decision Threshold:**",
+    f"{float(bundle['threshold']):.2f}",
+)
+
+st.sidebar.write(
+    "**Model Features:**",
+    len(bundle["features"]),
+)
+
+st.sidebar.caption(
+    "Risk bands are illustrative and are not "
+    "approved lending decision rules."
+)
+
+st.sidebar.divider()
 
 page = st.sidebar.radio(
     "Navigation",
@@ -337,9 +428,28 @@ page = st.sidebar.radio(
         "Overview",
         "Risk Monitoring",
         "Customer Analysis",
-        "Batch Analysis"
-    ]
+        "Batch Analysis",
+    ],
 )
+
+st.sidebar.divider()
+
+st.sidebar.caption(
+    "RepayIQ | Explainable Repayment Risk Analytics"
+)
+
+
+# =====================================================
+# LOAD PREDICTIONS
+# =====================================================
+
+try:
+    df = get_predictions(model_key)
+except Exception as error:
+    st.error(
+        f"Unable to generate predictions: {error}"
+    )
+    st.stop()
 
 
 # =====================================================
@@ -350,19 +460,45 @@ if page == "Overview":
 
     st.title("Overview")
 
+    st.caption(
+        "Portfolio-level repayment risk monitoring"
+    )
+
     total = len(df)
-    flagged = int(df["predicted_default"].sum())
+
+    flagged = int(
+        df["predicted_default"].sum()
+    )
+
     high = int(
         (df["risk_level"] == "High Risk").sum()
     )
-    avg = df["risk_percentage"].mean()
+
+    average_risk = df[
+        "risk_percentage"
+    ].mean()
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("Total Accounts", f"{total:,}")
-    c2.metric("Flagged Accounts", f"{flagged:,}")
-    c3.metric("High Risk", f"{high:,}")
-    c4.metric("Average Risk", f"{avg:.1f}%")
+    c1.metric(
+        "Total Accounts",
+        f"{total:,}",
+    )
+
+    c2.metric(
+        "Flagged Accounts",
+        f"{flagged:,}",
+    )
+
+    c3.metric(
+        "High Risk",
+        f"{high:,}",
+    )
+
+    c4.metric(
+        "Average Risk",
+        f"{average_risk:.1f}%",
+    )
 
     st.divider()
 
@@ -373,7 +509,7 @@ if page == "Overview":
 
         st.plotly_chart(
             risk_distribution(df),
-            width="stretch"
+            use_container_width=True,
         )
 
     with right:
@@ -386,7 +522,9 @@ if page == "Overview":
             labels={
                 "risk_percentage": "Risk Score (%)"
             },
-            color_discrete_sequence=["#3B82F6"]
+            color_discrete_sequence=[
+                "#3B82F6"
+            ],
         )
 
         fig.update_layout(
@@ -395,8 +533,10 @@ if page == "Overview":
 
         st.plotly_chart(
             style_chart(fig),
-            width="stretch"
+            use_container_width=True,
         )
+
+    st.divider()
 
     st.subheader("Priority Accounts")
 
@@ -404,7 +544,13 @@ if page == "Overview":
         df["predicted_default"] == 1
     ].head(10)
 
-    display_risk_table(priority)
+    if priority.empty:
+        st.info(
+            "No accounts are flagged at the "
+            "current decision threshold."
+        )
+    else:
+        display_risk_table(priority)
 
 
 # =====================================================
@@ -415,37 +561,40 @@ elif page == "Risk Monitoring":
 
     st.title("Risk Monitoring")
 
-    selected = st.multiselect(
+    st.caption(
+        "Explore, filter, and export customer risk."
+    )
+
+    selected_levels = st.multiselect(
         "Risk Level",
-        ["High Risk", "Medium Risk", "Low Risk"],
+        [
+            "High Risk",
+            "Medium Risk",
+            "Low Risk",
+        ],
         default=[
             "High Risk",
             "Medium Risk",
-            "Low Risk"
-        ]
+            "Low Risk",
+        ],
     )
 
     filtered = df[
-        df["risk_level"].isin(selected)
-    ]
+        df["risk_level"].isin(selected_levels)
+    ].copy()
 
     st.metric(
         "Matching Accounts",
-        f"{len(filtered):,}"
+        f"{len(filtered):,}",
     )
 
     display_risk_table(filtered)
 
-    export = filtered.drop(
-        columns=["warning_indicators"],
-        errors="ignore"
-    )
-
     st.download_button(
-        "Export Report",
-        data=export.to_csv(index=False),
+        "Export Risk Report",
+        data=export_dataframe(filtered),
         file_name="repayiq_risk_report.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
 
@@ -457,9 +606,13 @@ elif page == "Customer Analysis":
 
     st.title("Customer Analysis")
 
+    st.caption(
+        "Customer-level risk insights and explanations"
+    )
+
     selected_id = st.selectbox(
-        "Customer",
-        df["Customer ID"].tolist()
+        "Select Customer",
+        df["Customer ID"].tolist(),
     )
 
     customer_df = df[
@@ -472,17 +625,17 @@ elif page == "Customer Analysis":
 
     c1.metric(
         "Risk Score",
-        f"{customer['risk_percentage']:.2f}%"
+        f"{customer['risk_percentage']:.2f}%",
     )
 
     c2.metric(
         "Risk Level",
-        customer["risk_level"]
+        customer["risk_level"],
     )
 
     c3.metric(
         "Late Payment Months",
-        int(customer["late_payment_count"])
+        int(customer["late_payment_count"]),
     )
 
     st.divider()
@@ -506,7 +659,7 @@ elif page == "Customer Analysis":
         "Bill": [
             customer[f"bill_{i}"]
             for i in range(1, 7)
-        ]
+        ],
     })
 
     fig = px.bar(
@@ -516,70 +669,96 @@ elif page == "Customer Analysis":
         barmode="group",
         color_discrete_map={
             "Payment": "#22C55E",
-            "Bill": "#3B82F6"
-        }
+            "Bill": "#3B82F6",
+        },
     )
 
     st.plotly_chart(
         style_chart(fig),
-        width="stretch"
+        use_container_width=True,
     )
 
     st.divider()
 
-    st.subheader("Risk Drivers")
+    st.subheader("Explainable AI: Risk Drivers")
+
+    st.caption(
+        "Understand which features increase or "
+        "decrease the model's risk score."
+    )
 
     if st.button(
         "Explain Prediction",
-        type="primary"
+        type="primary",
     ):
 
-        with st.spinner("Calculating..."):
-            explanation = get_explanation(
-                selected_id
+        try:
+            with st.spinner(
+                "Calculating SHAP contributions..."
+            ):
+                explanation = get_explanation(
+                    selected_id,
+                    model_key,
+                )
+
+            top = explanation.head(12).copy()
+
+            top["Impact"] = top[
+                "SHAP Value"
+            ].apply(
+                lambda value: (
+                    "Increases Risk"
+                    if value > 0
+                    else "Decreases Risk"
+                )
             )
 
-        top = explanation.head(12).copy()
-
-        top["Impact"] = top[
-            "SHAP Value"
-        ].apply(
-            lambda value: (
-                "Increases Risk"
-                if value > 0
-                else "Decreases Risk"
+            fig = px.bar(
+                top.sort_values("SHAP Value"),
+                x="SHAP Value",
+                y="Feature",
+                color="Impact",
+                orientation="h",
+                color_discrete_map={
+                    "Increases Risk": "#EF4444",
+                    "Decreases Risk": "#22C55E",
+                },
             )
-        )
 
-        fig = px.bar(
-            top.sort_values("SHAP Value"),
-            x="SHAP Value",
-            y="Feature",
-            color="Impact",
-            orientation="h",
-            color_discrete_map={
-                "Increases Risk": "#EF4444",
-                "Decreases Risk": "#22C55E"
-            }
-        )
+            fig.update_layout(
+                xaxis_title="SHAP Contribution",
+                yaxis_title="",
+            )
 
-        fig.update_layout(
-            xaxis_title="SHAP Contribution",
-            yaxis_title=""
-        )
+            st.plotly_chart(
+                style_chart(fig, height=500),
+                use_container_width=True,
+            )
 
-        st.plotly_chart(
-            style_chart(fig, height=500),
-            width="stretch"
-        )
+            st.dataframe(
+                explanation.head(12)[
+                    ["Feature", "SHAP Value"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-        st.dataframe(
-            explanation.head(12)[
-                ["Feature", "SHAP Value"]
-            ],
-            width="stretch",
-            hide_index=True
-        )
+            if model_key == "catboost":
+                st.caption(
+                    "CatBoost SHAP contributions are "
+                    "expressed in log-odds, not "
+                    "probability percentage points."
+                )
+            else:
+                st.caption(
+                    "Original model explanations use "
+                    "permutation-based SHAP."
+                )
+
+        except Exception as error:
+            st.error(
+                f"Explanation failed: {error}"
+            )
 
 
 # =====================================================
@@ -590,24 +769,38 @@ elif page == "Batch Analysis":
 
     st.title("Batch Analysis")
 
+    st.caption(
+        "Upload customer records for bulk risk scoring"
+    )
+
     st.subheader("Import Data")
 
-    sample = pd.read_csv(
-        REPORT_DIR / "demo_customers.csv"
-    )
+    try:
+        sample = read_demo_data()
 
-    sample = sample[required_features].head(10)
+        sample_columns = (
+            ["Customer ID"] + RAW_COLUMNS
+        )
 
-    st.download_button(
-        "Download Sample CSV",
-        data=sample.to_csv(index=False),
-        file_name="repayiq_sample.csv",
-        mime="text/csv"
-    )
+        sample = sample[
+            sample_columns
+        ].head(10)
+
+        st.download_button(
+            "Download Sample CSV",
+            data=sample.to_csv(index=False),
+            file_name="repayiq_sample.csv",
+            mime="text/csv",
+        )
+
+    except Exception as error:
+        st.warning(
+            f"Sample CSV unavailable: {error}"
+        )
 
     uploaded_file = st.file_uploader(
-        "Upload CSV",
-        type=["csv"]
+        "Upload Customer CSV",
+        type=["csv"],
     )
 
     if uploaded_file is not None:
@@ -616,18 +809,23 @@ elif page == "Batch Analysis":
             uploaded_file.getvalue()
         ).hexdigest()
 
+        analysis_signature = (
+            file_signature,
+            model_key,
+        )
+
         if (
             st.session_state.get(
-                "batch_file_signature"
-            ) != file_signature
+                "batch_analysis_signature"
+            ) != analysis_signature
         ):
             st.session_state[
-                "batch_file_signature"
-            ] = file_signature
+                "batch_analysis_signature"
+            ] = analysis_signature
 
             st.session_state.pop(
                 "batch_results",
-                None
+                None,
             )
 
         try:
@@ -636,7 +834,8 @@ elif page == "Batch Analysis":
             )
 
             prepared_df = prepare_uploaded_data(
-                uploaded_df
+                uploaded_df,
+                bundle,
             )
 
             st.success(
@@ -647,16 +846,18 @@ elif page == "Batch Analysis":
 
             st.dataframe(
                 prepared_df.head(10),
-                width="stretch",
-                hide_index=True
+                use_container_width=True,
+                hide_index=True,
             )
 
             if st.button(
                 "Run Analysis",
-                type="primary"
+                type="primary",
             ):
 
-                with st.spinner("Processing..."):
+                with st.spinner(
+                    "Generating predictions..."
+                ):
                     results = predict_customers(
                         prepared_df
                     )
@@ -665,17 +866,22 @@ elif page == "Batch Analysis":
                     "batch_results"
                 ] = results
 
-                st.success("Analysis complete")
+                st.success(
+                    "Batch analysis completed!"
+                )
 
         except Exception as error:
             st.error(str(error))
 
             st.session_state.pop(
                 "batch_results",
-                None
+                None,
             )
 
-    if "batch_results" in st.session_state:
+    if (
+        uploaded_file is not None
+        and "batch_results" in st.session_state
+    ):
 
         results = st.session_state[
             "batch_results"
@@ -683,12 +889,14 @@ elif page == "Batch Analysis":
 
         st.divider()
 
-        st.subheader("Results")
+        st.subheader("Batch Results")
 
         total = len(results)
+
         flagged = int(
             results["predicted_default"].sum()
         )
+
         high = int(
             (
                 results["risk_level"] == "High Risk"
@@ -697,31 +905,38 @@ elif page == "Batch Analysis":
 
         c1, c2, c3 = st.columns(3)
 
-        c1.metric("Accounts Analyzed", total)
-        c2.metric("Flagged Accounts", flagged)
-        c3.metric("High Risk", high)
+        c1.metric(
+            "Accounts Analyzed",
+            f"{total:,}",
+        )
+
+        c2.metric(
+            "Flagged Accounts",
+            f"{flagged:,}",
+        )
+
+        c3.metric(
+            "High Risk",
+            f"{high:,}",
+        )
 
         st.subheader("Risk Distribution")
 
         st.plotly_chart(
             risk_distribution(results),
-            width="stretch"
+            use_container_width=True,
         )
 
         st.subheader("Priority Accounts")
 
         display_risk_table(results)
 
-        export = results.drop(
-            columns=["warning_indicators"],
-            errors="ignore"
+        st.download_button(
+            "Export Batch Results",
+            data=export_dataframe(results),
+            file_name="repayiq_batch_results.csv",
+            mime="text/csv",
         )
 
-        st.download_button(
-            "Export Results",
-            data=export.to_csv(index=False),
-            file_name="repayiq_batch_results.csv",
-            mime="text/csv"
-        )
 
 

@@ -1,0 +1,29 @@
+{
+  "rows": 30000,
+  "split_seed": 2026,
+  "note": "Exploratory matched-split comparison. The dataset was examined in earlier experiments, so this is not an independent external validation.",
+  "models": [
+    {
+      "model": "Original Gradient Boosting",
+      "cv_pr_auc": 0.5514821950937058,
+      "validation_pr_auc": 0.5657955568112863,
+      "best_params": {
+        "max_leaf_nodes": 15,
+        "max_iter": 250,
+        "learning_rate": 0.03,
+        "l2_regularization": 5.0
+      }
+    },
+    {
+      "model": "Advanced CatBoost",
+      "cv_pr_auc": 0.5566441139671324,
+      "validation_pr_auc": 0.562500571446405,
+      "best_params": {
+        "learning_rate": 0.02,
+        "l2_leaf_reg": 7,
+        "iterations": 200,
+        "depth": 6
+      }
+    }
+  ]
+}
